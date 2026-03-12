@@ -73,11 +73,11 @@ MAX_LEVERAGE = 0.5  # Conservative — survival > returns during challenge
 # Portfolio leverage cap (Vanta crypto limit: 5x)
 MAX_PORTFOLIO_LEVERAGE = 1.5
 
-# Minimum alpha score to forward signal (Jane default: 0.50)
-MIN_ALPHA_SCORE = 0.50
+# Minimum alpha score to forward signal (lowered from 0.50 for more signals)
+MIN_ALPHA_SCORE = 0.40
 
-# Minimum confidence to forward signal (Jane default: 0.50)
-MIN_CONFIDENCE = 0.50
+# Minimum confidence to forward signal (lowered from 0.50 for more signals)
+MIN_CONFIDENCE = 0.40
 
 # Scale leverage by alpha strength: leverage = base × strength_multiplier
 # strength = score × confidence (0 to 1.0)
@@ -85,7 +85,7 @@ BASE_LEVERAGE = 0.1  # 10% of portfolio at minimum signal
 LEVERAGE_SCALE = 0.4  # Additional leverage scaled by strength
 
 # Cooldown between signals per pair (seconds)
-SIGNAL_COOLDOWN = 300  # 5 min (Vanta has 5s minimum)
+SIGNAL_COOLDOWN = 120  # 2 min (Vanta has 5s minimum, faster reaction)
 
 # Use bracket orders with stop-loss and take-profit
 USE_BRACKET_ORDERS = True
