@@ -1,0 +1,26 @@
+# Secrets
+.env
+*.pem
+*.key
+*secrets*
+!api_keys.json
+
+# Bittensor wallets
+.bittensor/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Cloned repos (setup.sh clones these)
+sn64-chutes/chutes-miner/
+sn08-vanta/vanta-network/
+sn27-compute/SN27/
+
+# Node
+node_modules/
+
+# OS
+.DS_Store

@@ -1,0 +1,43 @@
+# SN64 Chutes - Helm Chart Values Template
+# Copy to chutes-miner/values.yaml and customize
+
+# Use k3s multi-cluster mode
+multiCluster: true
+
+# Validator configuration
+validators:
+  defaultRegistry: registry.chutes.ai
+  defaultApi: https://api.chutes.ai
+  supported:
+    - hotkey: 5Dt7HZ7Zpw4DppPxFM7Ke3Cm7sDAWhsZXmM5ZAmE7dSVJbcQ
+      registry: registry.chutes.ai
+      api: https://api.chutes.ai
+      socket: wss://ws.chutes.ai
+    # Add more validators as needed
+
+# HuggingFace model cache
+cache:
+  max_age_days: 30
+  max_size_gb: 850
+  overrides: {}
+    # Per-node overrides (GB):
+    # chutes-miner-gpu-0: 5000
+
+# Miner API exposed port
+minerApi:
+  service:
+    nodePort: 32000
+
+# Docker Hub credentials (create secret separately):
+# kubectl create secret docker-registry regcred \
+#   --docker-server=docker.io \
+#   --docker-username=YOUR_USER \
+#   --docker-password=YOUR_TOKEN \
+#   --docker-email=YOUR_EMAIL \
+#   -n chutes
+
+# Miner credentials (create secret separately):
+# kubectl create secret generic miner-credentials \
+#   --from-literal=ss58=YOUR_SS58_ADDRESS \
+#   --from-literal=seed=YOUR_SECRET_SEED_WITHOUT_0x \
+#   -n chutes

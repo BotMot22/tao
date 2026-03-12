@@ -1,0 +1,24 @@
+# SN64 Chutes - Ansible Inventory Template
+# Copy to chutes-miner/ansible/k3s/inventory.yml and fill in your values
+all:
+  children:
+    control:
+      hosts:
+        chutes-miner-cpu-0:
+          ansible_host: <CPU_NODE_IP>  # Your control plane node
+    workers:
+      hosts:
+        chutes-miner-gpu-0:
+          ansible_host: <GPU_NODE_1_IP>
+        # Add more GPU nodes as needed:
+        # chutes-miner-gpu-1:
+        #   ansible_host: <GPU_NODE_2_IP>
+  vars:
+    ansible_user: ubuntu
+    ansible_ssh_private_key_file: ~/.ssh/chutes_key.pem
+    ssh_keys:
+      - "ssh-rsa AAAA... your-key-here"
+    user: tao_miner
+    hotkey_path: "~/.bittensor/wallets/tao_miner/hotkeys/default"
+    chart_values: "~/chutes-miner/values.yaml"
+    grafana_password: <CHANGE_ME>
