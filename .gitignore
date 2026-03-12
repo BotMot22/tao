@@ -18,6 +18,7 @@ venv/
 sn64-chutes/chutes-miner/
 sn08-vanta/vanta-network/
 sn27-compute/SN27/
+sn33-cgp/cgp-subnet/
 
 # Node
 node_modules/
