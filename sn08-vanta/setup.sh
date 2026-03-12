@@ -1,17 +1,18 @@
 #!/bin/bash
-# SN8 Vanta (Taoshi) - Futures Trading Signal Miner
-# MEDIUM: CPU-only, but requires profitable trading strategy
-# Docs: https://docs.taoshi.io/ptn/overview/
+# SN8 Vanta × Jane Bridge - Complete Setup
+# Pipes Jane's 26-factor alpha signals into Vanta for TAO rewards
 set -euo pipefail
 
 echo "============================================"
-echo " SN8 VANTA (TAOSHI) - Futures Trading"
-echo " Difficulty: MEDIUM (strategy-dependent)"
-echo " Reward: PnL-based (100% Avg Daily PnL)"
+echo " SN8 VANTA × JANE QUANT BRIDGE"
+echo " Jane (8080) → Bridge → Vanta (8088)"
 echo "============================================"
 echo ""
 
-# Prerequisites
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
+
+# --- 1. Prerequisites ---
 echo "[*] Checking prerequisites..."
 MISSING=()
 command -v python3 &>/dev/null || MISSING+=("python3")
@@ -20,12 +21,12 @@ command -v pm2 &>/dev/null || MISSING+=("pm2")
 
 if [ ${#MISSING[@]} -gt 0 ]; then
     echo "[!] Missing: ${MISSING[*]}"
-    echo "  pip install bittensor"
+    echo "  pip install bittensor requests"
     echo "  npm install -g pm2"
-    echo ""
+    exit 1
 fi
 
-# Clone vanta network
+# --- 2. Clone & install Vanta ---
 if [ ! -d "vanta-network" ]; then
     echo "[+] Cloning vanta-network..."
     git clone https://github.com/taoshidev/vanta-network.git
@@ -35,65 +36,76 @@ if [ ! -d "vanta-network" ]; then
     export PIP_NO_CACHE_DIR=1
     pip install -r requirements.txt
     python3 -m pip install -e .
-    cd ..
+    pip install git+https://github.com/taoshidev/vanta-cli.git
+    cd "$SCRIPT_DIR"
 else
     echo "[*] vanta-network already cloned"
 fi
 
-# Setup API keys
+# --- 3. Setup API keys ---
 if [ ! -f "vanta-network/vanta_api/api_keys.json" ]; then
-    echo "[+] Creating API keys file..."
+    echo "[+] Creating API keys..."
     mkdir -p vanta-network/vanta_api
     cp api_keys.json vanta-network/vanta_api/api_keys.json
+    echo "[!] EDIT vanta-network/vanta_api/api_keys.json with a secure key"
+    echo "[!] ALSO update VANTA_API_KEY in strategy.py to match"
+fi
+
+# --- 4. Install bridge dependencies ---
+echo "[+] Installing bridge dependencies..."
+pip install requests >/dev/null 2>&1
+
+# --- 5. Verify Jane is running ---
+echo ""
+echo "[*] Checking Jane quant agent..."
+if curl -s http://127.0.0.1:8080/api/state >/dev/null 2>&1; then
+    JANE_STATE=$(curl -s http://127.0.0.1:8080/api/state)
+    echo "[✓] Jane is running"
+    echo "    Bankroll: $(echo "$JANE_STATE" | python3 -c "import sys,json; print(f'\${json.load(sys.stdin).get(\"bankroll\",0):,.2f}')" 2>/dev/null || echo "unknown")"
+    echo "    Open positions: $(echo "$JANE_STATE" | python3 -c "import sys,json; print(json.load(sys.stdin).get('n_open',0))" 2>/dev/null || echo "unknown")"
+else
+    echo "[!] Jane not running at http://127.0.0.1:8080"
+    echo "    Start Jane first: cd /root/jane && python jane.py"
+    echo "    The bridge will retry automatically once started"
 fi
 
 echo ""
-echo "=== SETUP STEPS ==="
+echo "=== DEPLOYMENT STEPS ==="
 echo ""
-echo "1. HARDWARE: 2 vCPU + 8GB RAM (CPU only, no GPU needed)"
-echo "   Any VPS works. Python 3.10 required."
-echo ""
-echo "2. REGISTER:"
+echo "1. REGISTER on SN8 (if not already):"
 echo "   btcli subnet register --netuid 8 --wallet.name tao_miner --wallet.hotkey default"
 echo ""
-echo "3. SELECT ASSET CLASS (permanent, cannot change):"
-echo "   pip install git+https://github.com/taoshidev/vanta-cli.git"
-echo "   vanta asset select"
-echo "   Options: crypto | forex | commodities | equities"
+echo "2. SELECT ASSET CLASS (one-time, permanent):"
+echo "   cd vanta-network && source venv/bin/activate"
+echo "   vanta asset select  # Choose: crypto"
 echo ""
-echo "4. DEPOSIT COLLATERAL:"
-echo "   vanta collateral deposit"
-echo "   Minimum: 300 THETA (\$150K trading capacity)"
-echo "   Maximum: 1000 THETA (\$500K trading capacity)"
+echo "3. DEPOSIT COLLATERAL:"
+echo "   vanta collateral deposit  # Minimum: 300 THETA"
 echo ""
-echo "5. START MINER:"
-echo "   cd vanta-network"
-echo "   python neurons/miner.py --netuid 8 --wallet.name tao_miner --wallet.hotkey default"
-echo "   # REST API starts on port 8088"
+echo "4. START VANTA MINER:"
+echo "   cd vanta-network && source venv/bin/activate"
+echo "   pm2 start neurons/miner.py --name vanta-miner --interpreter python3 -- \\"
+echo "     --netuid 8 --wallet.name tao_miner --wallet.hotkey default"
 echo ""
-echo "6. SEND TRADING SIGNALS:"
-echo "   python strategy.py  # Our custom strategy"
-echo "   # Or: POST http://127.0.0.1:8088/api/submit-order"
+echo "5. START JANE→VANTA BRIDGE:"
+echo "   pm2 start $SCRIPT_DIR/strategy.py --name jane-vanta-bridge --interpreter python3"
 echo ""
-echo "=== ASSET CLASSES ==="
-echo "  Crypto:      BTCUSD, ETHUSD, SOLUSD, XRPUSD, DOGEUSD, ADAUSD"
-echo "  Forex:       21 pairs (EURUSD, GBPUSD, etc.)"
-echo "  Commodities: XAUUSD (Gold), XAGUSD (Silver)"
-echo "  Equities:    25 stocks + 22 sector ETFs"
+echo "6. MONITOR:"
+echo "   pm2 logs jane-vanta-bridge"
+echo "   tail -f $SCRIPT_DIR/bridge.log"
+echo "   # Vanta dashboard: https://dashboard.taoshi.io"
 echo ""
-echo "=== SCORING ==="
-echo "  100% Average Daily PnL (USD change per trading day)"
-echo "  Recency weighted: first 10 days = 40% of score"
-echo "  Weekly payout cycle (targets Sunday midnight)"
+echo "=== SIGNAL FLOW ==="
+echo "  Jane (26 factors) → alpha score + direction"
+echo "    → Bridge polls every 30s"
+echo "    → Filters: score >= 0.50, confidence >= 0.50"
+echo "    → Maps: BTC→BTCUSD, SOL→SOLUSD"
+echo "    → Sizes: leverage = 0.1 + (strength × 0.4), max 0.5x"
+echo "    → Bracket orders with Jane's SL/TP levels"
+echo "    → Vanta miner receives signal on port 8088"
 echo ""
-echo "=== ELIMINATION RULES ==="
-echo "  - Max drawdown > 10% = PERMANENT elimination"
-echo "  - Plagiarism (copying trades) = PERMANENT elimination"
-echo "  - Challenge period: 61-90 trading days for new miners"
-echo "  - Never reuse eliminated hotkeys"
-echo ""
-echo "=== LEVERAGE LIMITS ==="
-echo "  Crypto:      0.01x-2.5x per position, 5x portfolio"
-echo "  Forex:       0.1x-10x per position, 20x portfolio"
-echo "  Commodities: 0.1x-4x per position"
-echo "  Equities:    0.1x-2x per position, 2x portfolio"
+echo "=== RISK CONTROLS ==="
+echo "  Max leverage/trade:  0.5x (Vanta limit: 2.5x)"
+echo "  Max portfolio:       1.5x (Vanta limit: 5x)"
+echo "  Bracket orders:      SL/TP from Jane's ATR/VaR calculations"
+echo "  Drawdown protection: Vanta eliminates at 10%, we stay under 5%"
