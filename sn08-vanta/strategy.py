@@ -2,8 +2,10 @@
 SN8 Vanta × Jane Quant Agent Bridge
 =====================================
 Pipes Jane's 26-factor alpha signals into the Vanta miner REST API.
+Sends TAO mining updates through Jane's Telegram bot.
 
 Jane (localhost:8080) → this bridge → Vanta miner (localhost:8088)
+                                    → Jane Telegram bot (TAO updates)
 
 Signal mapping:
   Jane "long"    → Vanta "LONG"
@@ -20,11 +22,13 @@ Challenge period: 61-90 trading days
 """
 
 import json
+import sys
 import time
 import logging
 import requests
+import subprocess
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -46,7 +50,11 @@ JANE_STATE_FILE = Path("/root/jane/data/jane_state.json")
 
 # Vanta miner
 VANTA_API = os.getenv("VANTA_API", "http://127.0.0.1:8088")
-VANTA_API_KEY = os.getenv("VANTA_API_KEY", "CHANGE_ME_TO_A_SECURE_RANDOM_STRING")
+VANTA_API_KEY = os.getenv("VANTA_API_KEY", "xc6gH8GIaG9z6JJ8G0ED8-io3w_fbJBtW16M55MvpVw")
+
+# Bittensor wallet
+WALLET_NAME = "tao_miner"
+HOTKEY_NAME = "default"
 
 # Asset mapping: Jane ticker → Vanta trade pair
 ASSET_MAP = {
@@ -85,6 +93,87 @@ USE_BRACKET_ORDERS = True
 # Poll interval (seconds)
 POLL_INTERVAL = 30
 
+# TAO status update interval (seconds) — sent via Telegram
+TAO_UPDATE_INTERVAL = 3600  # Hourly
+
+# State file for persistence across restarts
+BRIDGE_STATE_FILE = Path("/root/tao/sn08-vanta/bridge_state.json")
+
+
+# --- Telegram Integration (uses Jane's bot) ---
+
+# Load Jane's telegram config
+sys.path.insert(0, "/root/jane")
+try:
+    from config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+except ImportError:
+    TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+_tg_http = requests.Session()
+
+
+def tg_send(message: str, parse_mode: str = "HTML") -> bool:
+    """Send a message via Jane's Telegram bot."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        log.debug("Telegram not configured, skipping notification")
+        return False
+    try:
+        r = _tg_http.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": parse_mode,
+                "disable_web_page_preview": True,
+            },
+            timeout=10,
+        )
+        return r.status_code == 200
+    except Exception as e:
+        log.warning(f"Telegram send failed: {e}")
+        return False
+
+
+def get_tao_balance() -> dict:
+    """Get TAO wallet balance and subnet info via btcli."""
+    info = {"balance": 0.0, "registered": False, "uid": None, "incentive": 0.0, "rank": 0.0}
+    try:
+        result = subprocess.run(
+            ["btcli", "wallet", "overview", "--wallet-name", WALLET_NAME, "--no-prompt"],
+            capture_output=True, text=True, timeout=30,
+            input="\n",
+        )
+        output = result.stdout + result.stderr
+        # Parse balance
+        for line in output.split("\n"):
+            if "free balance" in line.lower():
+                # Extract number from line like "Wallet free balance: 0.3105 τ"
+                parts = line.split(":")
+                if len(parts) > 1:
+                    bal_str = parts[1].strip().split()[0].replace("‎", "").replace(",", "")
+                    try:
+                        info["balance"] = float(bal_str)
+                    except ValueError:
+                        pass
+            if "netuid" in line.lower() or "subnet" in line.lower():
+                info["registered"] = True
+    except Exception as e:
+        log.warning(f"btcli balance check failed: {e}")
+
+    return info
+
+
+def get_vanta_health() -> dict:
+    """Check Vanta miner health."""
+    try:
+        resp = requests.get(f"{VANTA_API}/api/health", timeout=5)
+        if resp.status_code == 200:
+            return {"status": "online", "data": resp.json()}
+    except Exception:
+        pass
+    return {"status": "offline"}
+
 
 @dataclass
 class VantaPosition:
@@ -96,6 +185,29 @@ class VantaPosition:
     jane_position_id: str
 
 
+@dataclass
+class BridgeStats:
+    """Track bridge performance for reporting."""
+    orders_sent: int = 0
+    orders_filled: int = 0
+    orders_failed: int = 0
+    positions_opened: int = 0
+    positions_closed: int = 0
+    direction_flips: int = 0
+    start_time: float = field(default_factory=time.time)
+    last_tao_update: float = 0.0
+
+    def uptime_str(self) -> str:
+        elapsed = time.time() - self.start_time
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        if hours > 24:
+            days = hours // 24
+            hours = hours % 24
+            return f"{days}d {hours}h {minutes}m"
+        return f"{hours}h {minutes}m"
+
+
 class JaneVantaBridge:
     """Bridge Jane's alpha signals to Vanta miner API."""
 
@@ -103,10 +215,45 @@ class JaneVantaBridge:
         self.active_positions: dict[str, VantaPosition] = {}  # pair → position
         self.last_signal_time: dict[str, float] = {}  # pair → timestamp
         self.total_leverage = 0.0
+        self.stats = BridgeStats()
+        self._load_state()
+
+    def _load_state(self):
+        """Load persisted bridge state."""
+        try:
+            if BRIDGE_STATE_FILE.exists():
+                data = json.loads(BRIDGE_STATE_FILE.read_text())
+                self.stats.orders_sent = data.get("orders_sent", 0)
+                self.stats.orders_filled = data.get("orders_filled", 0)
+                self.stats.positions_opened = data.get("positions_opened", 0)
+                self.stats.positions_closed = data.get("positions_closed", 0)
+                log.info(f"Loaded bridge state: {self.stats.orders_sent} orders sent")
+        except Exception:
+            pass
+
+    def _save_state(self):
+        """Persist bridge state."""
+        try:
+            data = {
+                "orders_sent": self.stats.orders_sent,
+                "orders_filled": self.stats.orders_filled,
+                "orders_failed": self.stats.orders_failed,
+                "positions_opened": self.stats.positions_opened,
+                "positions_closed": self.stats.positions_closed,
+                "direction_flips": self.stats.direction_flips,
+                "active_positions": {
+                    k: {"pair": v.pair, "direction": v.direction, "leverage": v.leverage}
+                    for k, v in self.active_positions.items()
+                },
+                "total_leverage": self.total_leverage,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+            BRIDGE_STATE_FILE.write_text(json.dumps(data, indent=2))
+        except Exception as e:
+            log.warning(f"Failed to save bridge state: {e}")
 
     def get_jane_state(self) -> dict | None:
         """Fetch Jane's current state via REST API or state file."""
-        # Try REST API first
         try:
             resp = requests.get(f"{JANE_API}/api/state", timeout=5)
             resp.raise_for_status()
@@ -114,7 +261,6 @@ class JaneVantaBridge:
         except Exception:
             pass
 
-        # Fallback to state file
         try:
             if JANE_STATE_FILE.exists():
                 return json.loads(JANE_STATE_FILE.read_text())
@@ -130,7 +276,6 @@ class JaneVantaBridge:
             return []
 
         positions = state.get("positions", [])
-        # Filter to crypto_spot only (what Vanta supports)
         return [
             p for p in positions
             if p.get("market_type") == "crypto_spot"
@@ -138,34 +283,19 @@ class JaneVantaBridge:
         ]
 
     def compute_leverage(self, position: dict) -> float:
-        """
-        Compute Vanta leverage from Jane's signal strength.
-
-        Jane provides:
-          - alpha_score (-1 to +1) in metadata
-          - confidence (0 to 1) in metadata
-          - vol-targeted size in $
-
-        We map strength to leverage conservatively.
-        """
+        """Compute Vanta leverage from Jane's signal strength."""
         metadata = position.get("metadata", {})
         alpha_score = abs(metadata.get("alpha_score", 0.5))
         confidence = metadata.get("alpha_confidence", 0.5)
 
-        # Strength = score × confidence (0 to 1)
         strength = alpha_score * confidence
-
-        # Scale leverage: base + (strength × scale)
         leverage = BASE_LEVERAGE + (strength * LEVERAGE_SCALE)
-
-        # Cap at max
         leverage = min(leverage, MAX_LEVERAGE)
 
-        # Check portfolio limit
         remaining = MAX_PORTFOLIO_LEVERAGE - self.total_leverage
         leverage = min(leverage, remaining)
 
-        return round(max(leverage, 0.01), 3)  # Vanta minimum: 0.01x
+        return round(max(leverage, 0.01), 3)
 
     def submit_to_vanta(
         self,
@@ -189,6 +319,8 @@ class JaneVantaBridge:
             "Authorization": VANTA_API_KEY,
         }
 
+        self.stats.orders_sent += 1
+
         try:
             resp = requests.post(
                 f"{VANTA_API}/api/submit-order",
@@ -198,9 +330,11 @@ class JaneVantaBridge:
             )
             resp.raise_for_status()
             result = resp.json()
+            self.stats.orders_filled += 1
             log.info(f"VANTA ORDER: {trade_pair} {order_type} {leverage}x → {result}")
             return result
         except requests.exceptions.RequestException as e:
+            self.stats.orders_failed += 1
             log.error(f"Vanta order failed: {e}")
             return None
 
@@ -208,7 +342,7 @@ class JaneVantaBridge:
         """Open a position on Vanta based on Jane's signal."""
         asset = jane_pos["asset"]
         pair = ASSET_MAP[asset]
-        direction = jane_pos["side"].upper()  # "long" → "LONG"
+        direction = jane_pos["side"].upper()
 
         # Check cooldown
         now = time.time()
@@ -234,7 +368,6 @@ class JaneVantaBridge:
 
         # Build order
         if USE_BRACKET_ORDERS and "stop_loss" in jane_pos and "target" in jane_pos:
-            # Use bracket order with Jane's SL/TP levels
             result = self.submit_to_vanta(
                 trade_pair=pair,
                 order_type=direction,
@@ -261,11 +394,23 @@ class JaneVantaBridge:
             )
             self.total_leverage += leverage
             self.last_signal_time[pair] = now
+            self.stats.positions_opened += 1
+            self._save_state()
+
             log.info(
                 f"OPENED {pair} {direction} {leverage}x | "
                 f"Jane score={score:.2f} conf={confidence:.2f} | "
                 f"Portfolio leverage: {self.total_leverage:.2f}x"
             )
+
+            # Telegram notification
+            tg_send(
+                f"<b>TAO MINER — OPEN {direction}</b>\n"
+                f"<b>{pair}</b> {leverage}x\n"
+                f"Alpha: {score:.2f} | Conf: {confidence:.2f}\n"
+                f"Portfolio: {self.total_leverage:.2f}x leverage"
+            )
+
             return True
 
         return False
@@ -281,7 +426,19 @@ class JaneVantaBridge:
         if result and pair in self.active_positions:
             pos = self.active_positions.pop(pair)
             self.total_leverage = max(0, self.total_leverage - pos.leverage)
+            self.stats.positions_closed += 1
+            if reason == "direction_flip":
+                self.stats.direction_flips += 1
+            self._save_state()
+
             log.info(f"CLOSED {pair} | reason={reason} | Portfolio leverage: {self.total_leverage:.2f}x")
+
+            tg_send(
+                f"<b>TAO MINER — CLOSE</b>\n"
+                f"{pair} {pos.direction} {pos.leverage}x\n"
+                f"Reason: {reason}"
+            )
+
             return True
 
         return False
@@ -297,7 +454,6 @@ class JaneVantaBridge:
         """
         jane_positions = self.get_jane_positions()
 
-        # Build map of Jane's current positions by asset
         jane_by_pair: dict[str, dict] = {}
         for jp in jane_positions:
             pair = ASSET_MAP.get(jp["asset"])
@@ -315,15 +471,100 @@ class JaneVantaBridge:
 
             if pair in self.active_positions:
                 vanta_pos = self.active_positions[pair]
-
-                # Direction flip? Close and reopen
                 if vanta_pos.direction != jane_direction:
                     self.close_position(pair, reason="direction_flip")
                     self.open_position(jp)
-                # Otherwise: position already synced, no action needed
             else:
-                # New position from Jane
                 self.open_position(jp)
+
+    def send_tao_status(self):
+        """Send hourly TAO mining status update via Telegram."""
+        now = time.time()
+        if now - self.stats.last_tao_update < TAO_UPDATE_INTERVAL:
+            return
+
+        self.stats.last_tao_update = now
+
+        # Get TAO balance
+        tao_info = get_tao_balance()
+        balance = tao_info["balance"]
+
+        # Get Vanta health
+        vanta = get_vanta_health()
+
+        # Build status message
+        lines = [
+            "<b>⛏ TAO MINER STATUS</b>",
+            f"Subnet: SN8 (Vanta) | UID 255",
+            f"Uptime: {self.stats.uptime_str()}",
+            "",
+            f"<b>Wallet:</b> {balance:.4f} TAO",
+            "",
+            f"<b>Vanta Miner:</b> {vanta['status']}",
+            f"<b>Bridge:</b> {'synced' if self.active_positions else 'idle'}",
+            "",
+            f"<b>Positions:</b> {len(self.active_positions)} open",
+        ]
+
+        for pair, pos in self.active_positions.items():
+            age_min = int((now - pos.timestamp) / 60)
+            lines.append(f"  {pair} {pos.direction} {pos.leverage}x ({age_min}m)")
+
+        lines.extend([
+            "",
+            f"<b>Lifetime Stats:</b>",
+            f"  Orders: {self.stats.orders_sent} sent, {self.stats.orders_filled} filled",
+            f"  Opened: {self.stats.positions_opened} | Closed: {self.stats.positions_closed}",
+            f"  Flips: {self.stats.direction_flips}",
+            f"  Portfolio leverage: {self.total_leverage:.2f}x",
+            "",
+            f"<i>Challenge: day {self._challenge_day()}/61-90</i>",
+        ])
+
+        msg = "\n".join(lines)
+        tg_send(msg)
+        log.info("Sent hourly TAO status update")
+
+    def _challenge_day(self) -> int:
+        """Estimate challenge day (trading days since registration)."""
+        # Registered on 2026-03-12
+        from datetime import date
+        start = date(2026, 3, 12)
+        today = date.today()
+        delta = (today - start).days
+        # Rough estimate: ~5/7 are trading days
+        return max(1, int(delta * 5 / 7))
+
+    def format_tao_status(self) -> str:
+        """Format TAO status for Telegram /tao command (called from Jane)."""
+        tao_info = get_tao_balance()
+        vanta = get_vanta_health()
+        now = time.time()
+
+        lines = [
+            "<b>⛏ TAO MINER</b>",
+            f"SN8 Vanta | UID 255",
+            f"Balance: <b>{tao_info['balance']:.4f} TAO</b>",
+            f"Miner: {vanta['status']} | Bridge: {self.stats.uptime_str()}",
+            "",
+        ]
+
+        if self.active_positions:
+            lines.append(f"<b>Vanta Positions ({len(self.active_positions)}):</b>")
+            for pair, pos in self.active_positions.items():
+                age_min = int((now - pos.timestamp) / 60)
+                lines.append(f"  {pair} {pos.direction} {pos.leverage}x ({age_min}m)")
+        else:
+            lines.append("No active Vanta positions")
+
+        lines.extend([
+            "",
+            f"Orders: {self.stats.orders_sent} | Filled: {self.stats.orders_filled}",
+            f"Opens: {self.stats.positions_opened} | Closes: {self.stats.positions_closed}",
+            f"Challenge day: ~{self._challenge_day()}/61",
+        ])
+
+        return "\n".join(lines)
 
     def run(self):
         """Main bridge loop."""
@@ -336,30 +577,36 @@ class JaneVantaBridge:
         log.info(f"Asset map:    {ASSET_MAP}")
         log.info(f"Max leverage: {MAX_LEVERAGE}x per position")
         log.info(f"Max portfolio: {MAX_PORTFOLIO_LEVERAGE}x total")
-        log.info(f"Min alpha:    {MIN_ALPHA_SCORE}")
-        log.info(f"Min conf:     {MIN_CONFIDENCE}")
         log.info(f"Brackets:     {USE_BRACKET_ORDERS}")
         log.info(f"Poll interval: {POLL_INTERVAL}s")
-        log.info("")
-        log.info("WARNING: Vanta eliminates at 10% drawdown. Stay conservative.")
-        log.info("Challenge period: 61-90 trading days before full rewards.")
+        log.info(f"Telegram:     {'configured' if TELEGRAM_BOT_TOKEN else 'not configured'}")
         log.info("=" * 60)
 
-        # Verify Jane is reachable
+        # Startup notification
         state = self.get_jane_state()
         if state:
             log.info(f"Jane connected | Bankroll: ${state.get('bankroll', 0):,.2f} | "
                      f"Open: {state.get('n_open', 0)} | Win rate: {state.get('win_rate', 0):.0%}")
-        else:
-            log.warning("Jane not reachable — will retry on each cycle")
+
+        tg_send(
+            "<b>⛏ TAO MINER ONLINE</b>\n"
+            "SN8 Vanta | UID 255\n"
+            f"Jane → Bridge → Vanta\n"
+            f"BTC→BTCUSD, SOL→SOLUSD\n\n"
+            f"<i>Type /tao for status updates</i>"
+        )
+
+        # Force first status update after 5 min
+        self.stats.last_tao_update = time.time() - TAO_UPDATE_INTERVAL + 300
 
         cycle = 0
         while True:
             try:
                 cycle += 1
                 self.sync_positions()
+                self.send_tao_status()
 
-                if cycle % 10 == 0:  # Log status every ~5 min
+                if cycle % 10 == 0:
                     log.info(
                         f"Cycle {cycle} | Vanta positions: {len(self.active_positions)} | "
                         f"Portfolio leverage: {self.total_leverage:.2f}x"
@@ -367,6 +614,7 @@ class JaneVantaBridge:
 
             except KeyboardInterrupt:
                 log.info("Shutting down bridge...")
+                tg_send("<b>⛏ TAO MINER OFFLINE</b>\nBridge stopped.")
                 break
             except Exception as e:
                 log.error(f"Bridge error: {e}", exc_info=True)

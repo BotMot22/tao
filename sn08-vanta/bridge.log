@@ -1,0 +1,32 @@
+2026-03-12 17:46:03,979 [INFO] ============================================================
+2026-03-12 17:46:03,981 [INFO] JANE × VANTA BRIDGE
+2026-03-12 17:46:03,983 [INFO] ============================================================
+2026-03-12 17:46:03,983 [INFO] Jane API:     http://127.0.0.1:8080
+2026-03-12 17:46:03,983 [INFO] Jane state:   /root/jane/data/jane_state.json
+2026-03-12 17:46:03,983 [INFO] Vanta API:    http://127.0.0.1:8088
+2026-03-12 17:46:03,983 [INFO] Asset map:    {'BTC': 'BTCUSD', 'SOL': 'SOLUSD'}
+2026-03-12 17:46:03,983 [INFO] Max leverage: 0.5x per position
+2026-03-12 17:46:03,983 [INFO] Max portfolio: 1.5x total
+2026-03-12 17:46:03,983 [INFO] Min alpha:    0.5
+2026-03-12 17:46:03,983 [INFO] Min conf:     0.5
+2026-03-12 17:46:03,983 [INFO] Brackets:     True
+2026-03-12 17:46:03,983 [INFO] Poll interval: 30s
+2026-03-12 17:46:03,983 [INFO] 
+2026-03-12 17:46:03,983 [INFO] WARNING: Vanta eliminates at 10% drawdown. Stay conservative.
+2026-03-12 17:46:03,983 [INFO] Challenge period: 61-90 trading days before full rewards.
+2026-03-12 17:46:03,983 [INFO] ============================================================
+2026-03-12 17:46:08,798 [INFO] Jane connected | Bankroll: $24,083.14 | Open: 3 | Win rate: 36%
+2026-03-12 17:51:03,223 [INFO] ============================================================
+2026-03-12 17:51:03,223 [INFO] JANE × VANTA BRIDGE
+2026-03-12 17:51:03,223 [INFO] ============================================================
+2026-03-12 17:51:03,223 [INFO] Jane API:     http://127.0.0.1:8080
+2026-03-12 17:51:03,223 [INFO] Jane state:   /root/jane/data/jane_state.json
+2026-03-12 17:51:03,223 [INFO] Vanta API:    http://127.0.0.1:8088
+2026-03-12 17:51:03,223 [INFO] Asset map:    {'BTC': 'BTCUSD', 'SOL': 'SOLUSD'}
+2026-03-12 17:51:03,223 [INFO] Max leverage: 0.5x per position
+2026-03-12 17:51:03,224 [INFO] Max portfolio: 1.5x total
+2026-03-12 17:51:03,224 [INFO] Brackets:     True
+2026-03-12 17:51:03,224 [INFO] Poll interval: 30s
+2026-03-12 17:51:03,224 [INFO] Telegram:     configured
+2026-03-12 17:51:03,224 [INFO] ============================================================
+2026-03-12 17:51:07,858 [INFO] Jane connected | Bankroll: $24,083.14 | Open: 3 | Win rate: 36%
