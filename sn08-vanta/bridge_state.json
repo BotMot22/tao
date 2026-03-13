@@ -1,0 +1,11 @@
+{
+  "orders_sent": 0,
+  "orders_filled": 0,
+  "orders_failed": 0,
+  "positions_opened": 0,
+  "positions_closed": 0,
+  "direction_flips": 0,
+  "active_positions": {},
+  "total_leverage": 0.0,
+  "updated_at": "2026-03-13T14:47:40.948834+00:00"
+}

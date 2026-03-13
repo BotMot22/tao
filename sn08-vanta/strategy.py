@@ -15,6 +15,7 @@ Signal mapping:
 Asset mapping:
   Jane BTC  → Vanta BTCUSD
   Jane SOL  → Vanta SOLUSD
+  Jane AVAX → Vanta SOLUSD (proxy — high-beta alt correlation)
 
 Vanta scoring: 100% Avg Daily PnL
 Elimination: >10% max drawdown = permanent ban
@@ -60,9 +61,13 @@ HOTKEY_NAME = "default"
 ASSET_MAP = {
     "BTC": "BTCUSD",
     "SOL": "SOLUSD",
-    # AVAX not available on Vanta
+    "AVAX": "SOLUSD",  # Proxy: AVAX → SOLUSD (high-beta alt correlation)
     # ETH could be added if Jane adds it
 }
+
+# Assets that share a Vanta pair (proxy mappings)
+# When multiple Jane assets map to the same Vanta pair, use the strongest signal
+PROXY_ASSETS = {"AVAX": "SOLUSD"}  # AVAX proxied through SOL
 
 # --- Risk Management (phi framework adapted for Vanta) ---
 # Vanta eliminates at 10% drawdown — we must be conservative
@@ -217,6 +222,7 @@ class JaneVantaBridge:
         self.total_leverage = 0.0
         self.stats = BridgeStats()
         self._load_state()
+        self._save_state()  # Ensure state file exists for monitoring
 
     def _load_state(self):
         """Load persisted bridge state."""
@@ -275,11 +281,10 @@ class JaneVantaBridge:
         if not state:
             return []
 
-        positions = state.get("positions", [])
+        positions = state.get("crypto_positions", [])
         return [
             p for p in positions
-            if p.get("market_type") == "crypto_spot"
-            and p.get("asset") in ASSET_MAP
+            if p.get("asset") in ASSET_MAP
         ]
 
     def compute_leverage(self, position: dict) -> float:
@@ -397,8 +402,10 @@ class JaneVantaBridge:
             self.stats.positions_opened += 1
             self._save_state()
 
+            proxy_note = f" (via {asset})" if asset in PROXY_ASSETS else ""
+
             log.info(
-                f"OPENED {pair} {direction} {leverage}x | "
+                f"OPENED {pair}{proxy_note} {direction} {leverage}x | "
                 f"Jane score={score:.2f} conf={confidence:.2f} | "
                 f"Portfolio leverage: {self.total_leverage:.2f}x"
             )
@@ -406,7 +413,7 @@ class JaneVantaBridge:
             # Telegram notification
             tg_send(
                 f"<b>TAO MINER — OPEN {direction}</b>\n"
-                f"<b>{pair}</b> {leverage}x\n"
+                f"<b>{pair}</b>{proxy_note} {leverage}x\n"
                 f"Alpha: {score:.2f} | Conf: {confidence:.2f}\n"
                 f"Portfolio: {self.total_leverage:.2f}x leverage"
             )
@@ -443,6 +450,16 @@ class JaneVantaBridge:
 
         return False
 
+    def _pick_strongest(self, positions: list[dict]) -> dict:
+        """When multiple Jane assets map to the same Vanta pair, pick strongest signal."""
+        if len(positions) == 1:
+            return positions[0]
+        # Score by alpha_score × confidence
+        def strength(p):
+            m = p.get("metadata", {})
+            return abs(m.get("alpha_score", 0)) * m.get("alpha_confidence", 0)
+        return max(positions, key=strength)
+
     def sync_positions(self):
         """
         Main sync loop: compare Jane's positions with Vanta's.
@@ -451,22 +468,35 @@ class JaneVantaBridge:
         1. Jane has position, Vanta doesn't → OPEN on Vanta
         2. Jane closed position, Vanta still open → CLOSE on Vanta
         3. Jane flipped direction → CLOSE + OPEN on Vanta
+
+        When multiple Jane assets map to the same Vanta pair (e.g. AVAX→SOLUSD),
+        the strongest signal wins.
         """
         jane_positions = self.get_jane_positions()
 
-        jane_by_pair: dict[str, dict] = {}
+        # Group by Vanta pair — multiple Jane assets may map to same pair
+        jane_by_pair: dict[str, list[dict]] = {}
         for jp in jane_positions:
             pair = ASSET_MAP.get(jp["asset"])
             if pair:
-                jane_by_pair[pair] = jp
+                jane_by_pair.setdefault(pair, []).append(jp)
+
+        # Resolve conflicts: pick strongest signal per Vanta pair
+        best_by_pair: dict[str, dict] = {}
+        for pair, candidates in jane_by_pair.items():
+            best = self._pick_strongest(candidates)
+            best_by_pair[pair] = best
+            if len(candidates) > 1:
+                assets = [c["asset"] for c in candidates]
+                log.info(f"Proxy conflict on {pair}: {assets} → using {best['asset']}")
 
         # Close positions Jane no longer holds
         for pair in list(self.active_positions.keys()):
-            if pair not in jane_by_pair:
+            if pair not in best_by_pair:
                 self.close_position(pair, reason="jane_closed")
 
         # Open/update positions Jane holds
-        for pair, jp in jane_by_pair.items():
+        for pair, jp in best_by_pair.items():
             jane_direction = jp["side"].upper()
 
             if pair in self.active_positions:
@@ -592,7 +622,7 @@ class JaneVantaBridge:
             "<b>⛏ TAO MINER ONLINE</b>\n"
             "SN8 Vanta | UID 255\n"
             f"Jane → Bridge → Vanta\n"
-            f"BTC→BTCUSD, SOL→SOLUSD\n\n"
+            f"BTC→BTCUSD, SOL→SOLUSD, AVAX→SOLUSD\n\n"
             f"<i>Type /tao for status updates</i>"
         )
 
